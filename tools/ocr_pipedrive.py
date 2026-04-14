@@ -186,3 +186,85 @@ def register(mcp):
                 {"error": str(e), "file_id": file_id},
                 ensure_ascii=False
             )
+    @mcp.tool()
+    def read_pipedrive_attachments_ocr_bulk(file_ids_csv: str, language: str = "auto") -> str:
+        """
+        Effectue l'OCR sur plusieurs pièces jointes Pipedrive en un seul appel.
+        Conçu pour traiter la liste retournée par list_deal_attachments
+        (outil du serveur MCP Pipedrive) sans appels individuels répétés.
+
+        Args:
+            file_ids_csv : IDs de pièces jointes séparés par des virgules (max 10).
+                        Exemple: "123456,789012,345678"
+                        Les IDs viennent du champ "attachment_ids" de list_deal_attachments.
+            language     : Code langue ISO ('fr', 'en', 'nl'...) appliqué à tous.
+                        'auto' pour détection automatique (défaut).
+
+        Returns:
+            JSON avec :
+            - total   : nombre de fichiers soumis
+            - success : nombre d'OCR réussis
+            - errors  : nombre d'échecs
+            - results : liste de {file_id, status, text_full, information_extraite, error}
+        """
+        if not AZURE_VISION_ENDPOINT or not AZURE_VISION_KEY:
+            return json.dumps({"error": "Credentials Azure non configurés."}, ensure_ascii=False)
+
+        if not PIPEDRIVE_API_TOKEN or not PIPEDRIVE_SUBDOMAIN:
+            return json.dumps({"error": "Credentials Pipedrive non configurés."}, ensure_ascii=False)
+
+        # ── Parse et validation des IDs ───────────────────────────
+        file_ids = [fid.strip() for fid in file_ids_csv.split(",") if fid.strip()]
+        if not file_ids:
+            return json.dumps({"error": "Aucun file_id fourni."}, ensure_ascii=False)
+
+        file_ids = file_ids[:10]  # Plafond à 10 pour éviter les timeouts
+
+        results = []
+        success_count = 0
+        error_count   = 0
+
+        for file_id in file_ids:
+            try:
+                # ── Téléchargement depuis Pipedrive ────────────────
+                blob, content_type, ext = _download_pipedrive_attachment(file_id)
+
+                # ── OCR Azure ──────────────────────────────────────
+                result     = azure_read_analyze(blob, AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, language.strip())
+                text_full, pages_struct = extract_text_from_azure_result(result)
+
+                lines = []
+                if pages_struct:
+                    for pg in pages_struct:
+                        lines.extend(pg["lines"])
+                else:
+                    lines = [l.strip() for l in (text_full or "").splitlines() if l and l.strip()]
+
+                kv = extract_kv_from_lines(lines)
+
+                results.append({
+                    "file_id":             file_id,
+                    "status":              "success",
+                    "content_type":        content_type,
+                    "char_count":          len(text_full),
+                    "text_full":           text_full,
+                    "information_extraite": kv,
+                    "error":               None,
+                })
+                success_count += 1
+
+            except Exception as e:
+                results.append({
+                    "file_id": file_id,
+                    "status":  "error",
+                    "error":   str(e),
+                })
+                error_count += 1
+
+        output = {
+            "total":   len(file_ids),
+            "success": success_count,
+            "errors":  error_count,
+            "results": results,
+        }
+        return json.dumps(output, ensure_ascii=False, indent=2)

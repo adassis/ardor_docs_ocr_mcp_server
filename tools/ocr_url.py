@@ -175,3 +175,84 @@ def register(mcp):
                 {"error": str(e), "file_url": file_url},
                 ensure_ascii=False
             )
+    @mcp.tool()
+    def read_documents_ocr_bulk(urls_csv: str, language: str = "auto") -> str:
+        """
+        Effectue l'OCR sur plusieurs documents publics en un seul appel.
+        Conçu pour éviter les appels individuels répétés quand on a
+        plusieurs URLs à analyser.
+
+        Args:
+            urls_csv : URLs séparées par des virgules (max 10).
+                    Exemple: "https://site.com/doc1.pdf,https://site.com/doc2.pdf"
+            language : Code langue ISO ('fr', 'en', 'nl'...) appliqué à tous.
+                    'auto' pour détection automatique (défaut).
+
+        Returns:
+            JSON avec :
+            - total        : nombre d'URLs soumises
+            - success      : nombre d'OCR réussis
+            - errors       : nombre d'échecs
+            - results      : liste de {url, status, text_full, information_extraite, error}
+        """
+        if not AZURE_VISION_ENDPOINT or not AZURE_VISION_KEY:
+            return json.dumps({"error": "Credentials Azure non configurés."}, ensure_ascii=False)
+
+        # ── Parse et validation des URLs ──────────────────────────
+        urls = [u.strip() for u in urls_csv.split(",") if u.strip()]
+        if not urls:
+            return json.dumps({"error": "Aucune URL fournie."}, ensure_ascii=False)
+
+        urls = urls[:10]  # Plafond à 10 pour éviter les timeouts
+
+        results = []
+        success_count = 0
+        error_count   = 0
+
+        for url in urls:
+            try:
+                # ── Téléchargement ─────────────────────────────────
+                r = requests.get(url, timeout=60, allow_redirects=True)
+                if r.status_code != 200:
+                    raise RuntimeError(f"HTTP {r.status_code}")
+
+                blob = r.content
+
+                # ── OCR Azure ──────────────────────────────────────
+                result     = azure_read_analyze(blob, AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, language.strip())
+                text_full, pages_struct = extract_text_from_azure_result(result)
+
+                lines = []
+                if pages_struct:
+                    for pg in pages_struct:
+                        lines.extend(pg["lines"])
+                else:
+                    lines = [l.strip() for l in (text_full or "").splitlines() if l and l.strip()]
+
+                kv = extract_kv_from_lines(lines)
+
+                results.append({
+                    "url":                 url,
+                    "status":              "success",
+                    "char_count":          len(text_full),
+                    "text_full":           text_full,
+                    "information_extraite": kv,
+                    "error":               None,
+                })
+                success_count += 1
+
+            except Exception as e:
+                results.append({
+                    "url":    url,
+                    "status": "error",
+                    "error":  str(e),
+                })
+                error_count += 1
+
+        output = {
+            "total":   len(urls),
+            "success": success_count,
+            "errors":  error_count,
+            "results": results,
+        }
+        return json.dumps(output, ensure_ascii=False, indent=2)
