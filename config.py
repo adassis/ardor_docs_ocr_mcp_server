@@ -27,3 +27,12 @@ AZURE_VISION_ENDPOINT = os.environ.get("AZURE_VISION_ENDPOINT", "").rstrip("/")
 
 AZURE_VISION_KEY = os.environ.get("AZURE_VISION_KEY", "")
 # Clé d'authentification Azure (Clé 1 ou Clé 2 depuis le portail Azure).
+
+# ── Pipedrive ─────────────────────────────────────────────────
+PIPEDRIVE_API_TOKEN = os.environ.get("PIPEDRIVE_API_TOKEN", "")
+# Token API personnel Pipedrive.
+# Récupéré dans Pipedrive > Profil > Personal preferences > API.
+
+PIPEDRIVE_SUBDOMAIN = os.environ.get("PIPEDRIVE_SUBDOMAIN", "")
+# Sous-domaine de votre instance Pipedrive.
+# Ex: si votre URL est "seraphin.pipedrive.com" → valeur = "seraphin"
