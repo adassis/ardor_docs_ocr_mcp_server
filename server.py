@@ -19,7 +19,7 @@ from config import PORT, MCP_BEARER_TOKEN
 
 # ── Import des modules d'outils ───────────────────────────────
 import tools.ocr_url
-import tools.ocr_pipedrive   ← décommentez quand le tool Pipedrive sera prêt
+import tools.ocr_pipedrive
 
 
 
