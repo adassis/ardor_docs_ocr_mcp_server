@@ -19,8 +19,8 @@ from config import PORT, MCP_BEARER_TOKEN
 
 # ── Import des modules d'outils ───────────────────────────────
 import tools.ocr_url
-# import tools.ocr_pipedrive   ← décommentez quand le tool Pipedrive sera prêt
-# import tools.mon_futur_outil  ← pattern à suivre pour chaque nouvel outil
+import tools.ocr_pipedrive   ← décommentez quand le tool Pipedrive sera prêt
+
 
 
 # ── Initialisation du serveur MCP ─────────────────────────────
@@ -38,7 +38,7 @@ mcp = FastMCP(
 
 # ── Enregistrement des outils ─────────────────────────────────
 tools.ocr_url.register(mcp)
-# tools.ocr_pipedrive.register(mcp)   ← décommentez avec l'import ci-dessus
+tools.ocr_pipedrive.register(mcp)
 
 
 # ── Middleware d'authentification Bearer Token ────────────────
