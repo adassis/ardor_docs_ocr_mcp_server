@@ -18,14 +18,14 @@ from starlette.responses import JSONResponse
 from config import PORT, MCP_BEARER_TOKEN
 
 # ── Import des modules d'outils ───────────────────────────────
-import tools.ocr_url
-import tools.ocr_pipedrive
-
+import tools.ocr_ardor_docs
+import tools.ocr_paperform_attachments
+import tools.ocr_pipedrive_attachments
 
 
 # ── Initialisation du serveur MCP ─────────────────────────────
 mcp = FastMCP(
-    name="azure-ocr-server",
+    name="yago_ocr_read_documents",
     host="0.0.0.0",
     port=PORT,
     instructions=(
@@ -37,9 +37,9 @@ mcp = FastMCP(
 
 
 # ── Enregistrement des outils ─────────────────────────────────
-tools.ocr_url.register(mcp)
-tools.ocr_pipedrive.register(mcp)
-
+tools.ocr_ardor_docs.register(mcp)
+tools.ocr_paperform_attachments.register(mcp)
+tools.ocr_pipedrive_attachments.register(mcp)
 
 # ── Middleware d'authentification Bearer Token ────────────────
 class BearerAuthMiddleware(BaseHTTPMiddleware):

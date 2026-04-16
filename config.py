@@ -36,3 +36,7 @@ PIPEDRIVE_API_TOKEN = os.environ.get("PIPEDRIVE_API_TOKEN", "")
 PIPEDRIVE_SUBDOMAIN = os.environ.get("PIPEDRIVE_SUBDOMAIN", "")
 # Sous-domaine de votre instance Pipedrive.
 # Ex: si votre URL est "seraphin.pipedrive.com" → valeur = "seraphin"
+
+# ── Paperform ─────────────────────────────────────────────────
+PAPERFORM_API_TOKEN = os.environ.get("PAPERFORM_API_TOKEN", "")
+# Token API Paperform : paperform.co/account/developer
