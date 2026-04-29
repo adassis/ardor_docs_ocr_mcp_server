@@ -40,3 +40,6 @@ PIPEDRIVE_SUBDOMAIN = os.environ.get("PIPEDRIVE_SUBDOMAIN", "")
 # ── Paperform ─────────────────────────────────────────────────
 PAPERFORM_API_TOKEN = os.environ.get("PAPERFORM_API_TOKEN", "")
 # Token API Paperform : paperform.co/account/developer
+
+# ── Google Drive ──────────────────────────────────────────────
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
