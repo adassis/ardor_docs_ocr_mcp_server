@@ -110,6 +110,8 @@ def _list_files_in_folder(folder_id: str, access_token: str) -> list:
             "q": f"'{folder_id}' in parents and trashed = false",
             "fields": "nextPageToken, files(id, name, mimeType, size)",
             "pageSize": 1000,
+            "supportsAllDrives": True,         # ← AJOUTÉ : accès aux Shared Drives
+            "includeItemsFromAllDrives": True,  # ← AJOUTÉ : inclut les fichiers des Shared Drives
         }
         if page_token:
             params["pageToken"] = page_token
@@ -179,7 +181,10 @@ def _download_gdrive_file_via_api(file_id: str, access_token: str) -> tuple:
     r = requests.get(
         f"https://www.googleapis.com/drive/v3/files/{file_id}",
         headers=headers,
-        params={"alt": "media"},
+        params={
+            "alt": "media",
+            "supportsAllDrives": True,  # ← AJOUTÉ : accès aux fichiers des Shared Drives
+        },
         timeout=120,
         allow_redirects=True,
     )
