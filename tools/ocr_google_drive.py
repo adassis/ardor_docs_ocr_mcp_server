@@ -1,3 +1,22 @@
+# =============================================================
+# tools/ocr_google_drive.py — Outil MCP : OCR fichier(s) Google Drive
+# =============================================================
+# Expose 2 outils MCP :
+#   - read_google_drive_ocr         : OCR d'un seul fichier
+#   - read_google_drive_folder_ocr  : OCR de tous les fichiers d'un dossier
+#
+# 3 modes d'authentification (sélection automatique) :
+#   MODE 1 — OAuth2 utilisateur (prioritaire)
+#             → GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN
+#             → Accès aux Shared Drives et fichiers partagés avec l'utilisateur
+#   MODE 2 — Service Account
+#             → GOOGLE_SERVICE_ACCOUNT_JSON
+#             → Accès aux fichiers partagés avec le Service Account
+#   MODE 3 — Téléchargement public (fallback)
+#             → Aucune config requise
+#             → Fichiers publics uniquement
+# =============================================================
+
 import json
 import re
 import requests
@@ -6,6 +25,9 @@ from config import (
     AZURE_VISION_ENDPOINT,
     AZURE_VISION_KEY,
     GOOGLE_SERVICE_ACCOUNT_JSON,
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REFRESH_TOKEN,
 )
 from utils.azure import azure_read_analyze, extract_text_from_azure_result
 from utils.text import extract_kv_from_lines, extract_tokens
@@ -17,6 +39,9 @@ from utils.quality import (
     build_processing_diagnostics,
 )
 
+# =============================================================
+# TYPES MIME SUPPORTÉS PAR AZURE OCR
+# =============================================================
 SUPPORTED_MIME_TYPES = {
     "application/pdf",
     "image/jpeg",
@@ -34,6 +59,13 @@ SUPPORTED_MIME_TYPES = {
 # =============================================================
 
 def _extract_gdrive_file_id(url: str) -> str:
+    """
+    Extrait l'ID d'un fichier Google Drive depuis son URL.
+    Formats supportés :
+      - https://drive.google.com/file/d/FILE_ID/view?usp=sharing
+      - https://drive.google.com/open?id=FILE_ID
+      - https://drive.google.com/uc?export=download&id=FILE_ID
+    """
     m = re.search(r'/d/([a-zA-Z0-9_-]{10,})', url)
     if m:
         return m.group(1)
@@ -49,6 +81,10 @@ def _extract_gdrive_file_id(url: str) -> str:
 
 
 def _extract_gdrive_folder_id(url: str) -> str:
+    """
+    Extrait l'ID d'un dossier Google Drive depuis son URL.
+    Accepte aussi un ID passé directement.
+    """
     if re.match(r'^[a-zA-Z0-9_-]{10,}$', url.strip()):
         return url.strip()
     m = re.search(r'/folders/([a-zA-Z0-9_-]{10,})', url)
@@ -72,7 +108,45 @@ def _extract_gdrive_folder_id(url: str) -> str:
 # AUTHENTIFICATION
 # =============================================================
 
-def _get_google_access_token() -> str:
+def _get_google_access_token_oauth2() -> str:
+    """
+    Génère un Access Token via OAuth2 avec les credentials utilisateur.
+
+    Utilise le Refresh Token stocké dans Railway pour obtenir
+    un nouvel Access Token sans interaction humaine.
+
+    Avantage vs Service Account : accède aux Shared Drives
+    et tous les fichiers visibles par l'utilisateur connecté.
+    """
+    try:
+        import google.oauth2.credentials
+        import google.auth.transport.requests
+    except ImportError:
+        raise RuntimeError(
+            "La librairie 'google-auth' n'est pas installée. "
+            "Ajoutez 'google-auth>=2.0.0' dans requirements.txt."
+        )
+
+    # Création des credentials OAuth2 avec le Refresh Token
+    # token=None → sera automatiquement rempli lors du refresh
+    credentials = google.oauth2.credentials.Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+    )
+
+    # Échange le Refresh Token contre un Access Token valable 1h
+    credentials.refresh(google.auth.transport.requests.Request())
+    return credentials.token
+
+
+def _get_google_access_token_service_account() -> str:
+    """
+    Génère un Access Token via Service Account.
+    Fallback si OAuth2 non configuré.
+    """
     try:
         import google.oauth2.service_account
         import google.auth.transport.requests
@@ -84,10 +158,8 @@ def _get_google_access_token() -> str:
     try:
         service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"GOOGLE_SERVICE_ACCOUNT_JSON invalide (JSON malformé) : {e}\n"
-            "Copiez le contenu COMPLET du fichier JSON du Service Account."
-        )
+        raise RuntimeError(f"GOOGLE_SERVICE_ACCOUNT_JSON invalide : {e}")
+
     credentials = google.oauth2.service_account.Credentials.from_service_account_info(
         service_account_info,
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
@@ -96,11 +168,51 @@ def _get_google_access_token() -> str:
     return credentials.token
 
 
+def _get_google_access_token() -> str:
+    """
+    Sélectionne automatiquement le mode d'authentification.
+
+    Priorité :
+      1. OAuth2 utilisateur → si CLIENT_ID + CLIENT_SECRET + REFRESH_TOKEN configurés
+      2. Service Account   → si GOOGLE_SERVICE_ACCOUNT_JSON configuré
+      3. Erreur            → aucune credential configurée
+    """
+    if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN:
+        # MODE 1 : OAuth2 — accès au Shared Drive de l'utilisateur
+        return _get_google_access_token_oauth2()
+
+    elif GOOGLE_SERVICE_ACCOUNT_JSON:
+        # MODE 2 : Service Account
+        return _get_google_access_token_service_account()
+
+    else:
+        raise RuntimeError(
+            "Aucune credential Google Drive configurée sur Railway.\n"
+            "Configurez soit :\n"
+            "  • GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN (OAuth2)\n"
+            "  • GOOGLE_SERVICE_ACCOUNT_JSON (Service Account)"
+        )
+
+
+def _auth_mode() -> str:
+    """Retourne le mode d'auth actif (pour info dans les réponses JSON)."""
+    if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN:
+        return "oauth2"
+    elif GOOGLE_SERVICE_ACCOUNT_JSON:
+        return "service_account"
+    else:
+        return "public"
+
+
 # =============================================================
 # LISTING DU DOSSIER
 # =============================================================
 
 def _list_files_in_folder(folder_id: str, access_token: str) -> list:
+    """
+    Liste TOUS les fichiers d'un dossier Google Drive (avec pagination).
+    Supporte les Shared Drives via supportsAllDrives + includeItemsFromAllDrives.
+    """
     files = []
     page_token = None
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -110,8 +222,8 @@ def _list_files_in_folder(folder_id: str, access_token: str) -> list:
             "q": f"'{folder_id}' in parents and trashed = false",
             "fields": "nextPageToken, files(id, name, mimeType, size)",
             "pageSize": 1000,
-            "supportsAllDrives": True,         # ← AJOUTÉ : accès aux Shared Drives
-            "includeItemsFromAllDrives": True,  # ← AJOUTÉ : inclut les fichiers des Shared Drives
+            "supportsAllDrives": True,          # ← accès aux Shared Drives
+            "includeItemsFromAllDrives": True,  # ← inclut les fichiers des Shared Drives
         }
         if page_token:
             params["pageToken"] = page_token
@@ -126,9 +238,7 @@ def _list_files_in_folder(folder_id: str, access_token: str) -> list:
         if r.status_code == 403:
             raise RuntimeError(
                 "Accès refusé au dossier Google Drive (403). "
-                "Le Service Account n'a pas accès à ce dossier.\n"
-                "→ Dans Google Drive : clic droit sur le dossier > Partager\n"
-                "→ Ajoutez l'email du Service Account comme 'Lecteur'."
+                "Vérifiez que votre compte a bien accès à ce dossier."
             )
         if not r.ok:
             raise RuntimeError(
@@ -145,6 +255,10 @@ def _list_files_in_folder(folder_id: str, access_token: str) -> list:
 
 
 def _list_supported_files_in_folder(folder_id: str, access_token: str) -> tuple:
+    """
+    Liste les fichiers d'un dossier en séparant supportés et ignorés.
+    Filtre par type MIME compatible Azure OCR.
+    """
     all_files = _list_files_in_folder(folder_id, access_token)
     supported = []
     skipped = []
@@ -177,13 +291,17 @@ def _list_supported_files_in_folder(folder_id: str, access_token: str) -> tuple:
 # =============================================================
 
 def _download_gdrive_file_via_api(file_id: str, access_token: str) -> tuple:
+    """
+    Télécharge un fichier via l'API Drive v3.
+    Supporte les Shared Drives via supportsAllDrives.
+    """
     headers = {"Authorization": f"Bearer {access_token}"}
     r = requests.get(
         f"https://www.googleapis.com/drive/v3/files/{file_id}",
         headers=headers,
         params={
             "alt": "media",
-            "supportsAllDrives": True,  # ← AJOUTÉ : accès aux fichiers des Shared Drives
+            "supportsAllDrives": True,  # ← accès aux fichiers des Shared Drives
         },
         timeout=120,
         allow_redirects=True,
@@ -199,6 +317,10 @@ def _download_gdrive_file_via_api(file_id: str, access_token: str) -> tuple:
 
 
 def _download_gdrive_file_public(file_id: str) -> tuple:
+    """
+    Télécharge un fichier Google Drive PUBLIC sans authentification.
+    Fallback quand aucune credential n'est configurée.
+    """
     session = requests.Session()
     download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
     headers = {
@@ -215,7 +337,7 @@ def _download_gdrive_file_public(file_id: str) -> tuple:
         raise RuntimeError("Fichier Google Drive introuvable (404).")
     if r.status_code == 403:
         raise RuntimeError(
-            "Accès refusé (403). Configurez GOOGLE_SERVICE_ACCOUNT_JSON "
+            "Accès refusé (403). Configurez GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN "
             "pour accéder aux fichiers privés."
         )
     if r.status_code != 200:
@@ -254,13 +376,12 @@ def _download_gdrive_file_public(file_id: str) -> tuple:
             if "text/html" in content_type or b"<html" in r.content[:512].lower():
                 raise RuntimeError(
                     "Google Drive a renvoyé du HTML après confirmation. "
-                    "Configurez GOOGLE_SERVICE_ACCOUNT_JSON pour les fichiers privés."
+                    "Configurez GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN."
                 )
         else:
             raise RuntimeError(
                 "Google Drive a renvoyé une page HTML. Le fichier est peut-être privé.\n"
-                "→ Configurez GOOGLE_SERVICE_ACCOUNT_JSON pour les fichiers privés.\n"
-                "→ Ou vérifiez le partage 'Tout le monde avec le lien'."
+                "→ Configurez GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN."
             )
 
     if not r.content:
@@ -270,8 +391,16 @@ def _download_gdrive_file_public(file_id: str) -> tuple:
 
 
 def _download_gdrive_file(file_id: str) -> tuple:
-    if GOOGLE_SERVICE_ACCOUNT_JSON:
-        token = _get_google_access_token()
+    """
+    Sélectionne automatiquement le mode de téléchargement.
+    MODE 1/2 : via API (OAuth2 ou Service Account)
+    MODE 3   : public (fallback)
+    """
+    if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN:
+        token = _get_google_access_token_oauth2()
+        return _download_gdrive_file_via_api(file_id, token)
+    elif GOOGLE_SERVICE_ACCOUNT_JSON:
+        token = _get_google_access_token_service_account()
         return _download_gdrive_file_via_api(file_id, token)
     else:
         return _download_gdrive_file_public(file_id)
@@ -282,6 +411,10 @@ def _download_gdrive_file(file_id: str) -> tuple:
 # =============================================================
 
 def _ocr_one_file(blob: bytes, content_type: str, language: str) -> dict:
+    """
+    OCRise un fichier binaire et retourne les résultats structurés.
+    Partagée entre les deux outils MCP.
+    """
     result = azure_read_analyze(
         blob, AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, language.strip()
     )
@@ -339,9 +472,9 @@ def register(mcp):
         Lit un fichier Google Drive et en extrait le texte par OCR
         Azure Computer Vision.
 
-        Supporte les fichiers privés si GOOGLE_SERVICE_ACCOUNT_JSON
-        est configuré et que le Service Account a accès au fichier.
-        Sans Service Account, le fichier doit être partagé publiquement.
+        Supporte les fichiers privés et Shared Drives si
+        GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN
+        sont configurés sur Railway.
 
         Types supportés : PDF, JPG, PNG, TIFF, BMP, GIF, WebP.
         Google Docs/Sheets/Slides natifs non supportés
@@ -367,7 +500,7 @@ def register(mcp):
             output = {
                 "file_url": file_url,
                 "gdrive_file_id": file_id,
-                "auth_mode": "service_account" if GOOGLE_SERVICE_ACCOUNT_JSON else "public",
+                "auth_mode": _auth_mode(),
                 **ocr_result,
             }
             return json.dumps(output, ensure_ascii=False, indent=2)
@@ -390,6 +523,9 @@ def register(mcp):
         """
         Liste et OCRise les fichiers d'un dossier Google Drive par batch.
 
+        Supporte les Shared Drives si GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET
+        + GOOGLE_REFRESH_TOKEN sont configurés sur Railway.
+
         Conçu pour traiter les gros dossiers sans timeout Railway :
         chaque appel traite un petit nombre de fichiers (max_files),
         à partir d'une position donnée (offset).
@@ -400,44 +536,28 @@ def register(mcp):
           Appel 3 : offset=10, max_files=5   (si has_more=true)
           ... jusqu'à has_more=false
 
-        Nécessite GOOGLE_SERVICE_ACCOUNT_JSON configuré sur Railway.
-        Le Service Account doit avoir accès au dossier :
-        Dans Google Drive → clic droit sur le dossier → Partager →
-        ajouter l'email du Service Account comme Lecteur.
-
-        Fichiers ignorés automatiquement : Google Docs/Sheets/Slides
-        natifs et types non supportés par Azure OCR.
-
         Args:
             folder_url : URL du dossier Google Drive.
                          • https://drive.google.com/drive/folders/FOLDER_ID
-                         • https://drive.google.com/drive/folders/FOLDER_ID?usp=sharing
+                         • https://drive.google.com/drive/u/0/folders/FOLDER_ID
                          • L'ID du dossier directement
             language   : Code langue ISO ('fr', 'en', 'nl'...) ou 'auto'.
             max_files  : Nombre de fichiers à traiter par appel (défaut: 5).
-                         Gardez une valeur basse (5-10) pour éviter les timeouts.
             offset     : Position de départ dans la liste (défaut: 0).
                          Utilisez next_offset de la réponse précédente.
 
         Returns:
-            JSON avec :
-            - has_more                : true si d'autres fichiers restent
-            - next_offset             : valeur d'offset pour l'appel suivant
-            - summary.total_supported : total fichiers OCRisables dans le dossier
-            - summary.processed       : fichiers traités dans CE batch
-            - summary.offset          : position de départ de ce batch
-            - files_skipped           : fichiers ignorés (premier appel uniquement)
-            - results                 : OCR des fichiers de ce batch
-            - errors                  : fichiers en erreur dans ce batch
+            JSON avec has_more, next_offset, résultats OCR et fichiers ignorés.
         """
         if not AZURE_VISION_ENDPOINT or not AZURE_VISION_KEY:
             return json.dumps({"error": "Credentials Azure non configurés."}, ensure_ascii=False)
 
-        if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN) \
+                and not GOOGLE_SERVICE_ACCOUNT_JSON:
             return json.dumps({
                 "error": (
-                    "GOOGLE_SERVICE_ACCOUNT_JSON non configuré. "
-                    "Le listing de dossier nécessite un Service Account Google."
+                    "Aucune credential Google Drive configurée. "
+                    "Configurez GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN."
                 )
             }, ensure_ascii=False)
 
@@ -484,7 +604,7 @@ def register(mcp):
             output = {
                 "folder_url": folder_url,
                 "folder_id": folder_id,
-                "auth_mode": "service_account",
+                "auth_mode": _auth_mode(),
                 "has_more": has_more,
                 "next_offset": next_offset if has_more else None,
                 "summary": {
